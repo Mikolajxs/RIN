@@ -15,8 +15,8 @@ end
 
 %% User Configuration
 fprintf('\n--- Step Parameters ---\n');
-total_distance = 100;
-step_size = 10;
+total_distance = 600;
+step_size = 100;
 move_speed = 20;
 acq_time = 3;
 
@@ -32,6 +32,22 @@ SCOPE_IP = '10.112.161.137';
 SCOPE_CH_SIG = 1;
 SCOPE_CH_REF = 2;
 resampling_factor = 2;
+scope_session = visa('ni',['TCPIP0::',SCOPE_IP,'::INSTR']);
+fopen(scope_session);
+fprintf('Configuring oscilloscope...\n');
+%fprintf(scope_session, '*RST');  % Reset to default state
+%pause(1);
+    
+% Set trigger mode to SINGLE initially (will be controlled per step)
+fprintf(scope_session, 'TRMD AUTO');
+    
+% Set up basic acquisition parameters
+fprintf(scope_session, 'TDIV 200MS');  % Set timebase as needed
+fprintf(scope_session, 'C1:VDIV 200MV');  % Set voltage scale as needed
+fprintf(scope_session, 'C2:VDIV 1V');  % Set voltage scale as needed
+    
+% Set trigger source and level
+fprintf(scope_session, 'TRSE EDGE,SR,C1,HT,OFF');  % Edge trigger off
 
 %% Initialize Hardware
 try
@@ -52,7 +68,7 @@ catch ME
 end
 
 %% Create Data Directory
-data_dir = 'C:\Data\test\Mikolaj_test\29_07_25';
+data_dir = 'C:\Data\test\Mikolaj_test\5_08_25';
 save_dir = fullfile(data_dir, ['StepScan_' datestr(now, 'yyyymmdd_HHMMSS')]);
 mkdir(save_dir);
 fprintf('\nData will be saved to: %s\n', save_dir);
@@ -88,6 +104,13 @@ try
         scan_data(step).step_number = step;
         scan_data(step).target_position = target_pos;
         scan_data(step).actual_position = actual_pos;
+
+        fprintf(scope_session, 'TRMD STOP');
+        pause(0.1);  % Small delay to ensure command is processed
+
+        % Wait for any ongoing acquisition to complete
+        fprintf(scope_session, 'WAIT');
+        fprintf('Oscilloscope acquisition stopped for measurements...\n');
         
         % --- Collect INA data ---
         fprintf('Collecting INA data (%.1f seconds)...\n', acq_time);
@@ -95,14 +118,18 @@ try
         
         % --- Collect scope data ---
         %scan_data(step).scope_data = ScopeSoft(SCOPE_IP, SCOPE_CH_SIG, SCOPE_CH_REF, resampling_factor);
-        fprintf('Collecting oscilloscope data (%.1f seconds)...\n', acq_time);
-        scan_data(step).scope_data = ScopeSoft(SCOPE_IP, SCOPE_CH_SIG, SCOPE_CH_REF, resampling_factor, acq_time);
+        fprintf('Collecting oscilloscope data');
+        scan_data(step).scope_data = ScopeSoft(SCOPE_IP, SCOPE_CH_SIG, SCOPE_CH_REF, resampling_factor);
         
-        %scope_data.ch1 = acquireSds2354X(SCOPE_IP, SCOPE_CH_SIG, resampling_factor);
-        %scope_data.ch2 = acquireSds2354X(SCOPE_IP, SCOPE_CH_REF, resampling_factor);
         % --- Save intermediate results ---
         save(fullfile(save_dir, sprintf('step_%d_data.mat', step)), 'scan_data');
         fprintf('Data saved for step %d\n', step);
+        % --- RESTART OSCILLOSCOPE ACQUISITION ---
+        % Set trigger mode back to AUTO or NORMAL for continuous acquisition
+        fprintf(scope_session, 'TRMD AUTO');  % or 'TRMD NORM' for normal triggering
+        fprintf('Oscilloscope acquisition restarted.\n');
+        
+        pause(0.2);  % Small delay before next step
     end
     
     % --- Return to home position ---
@@ -119,6 +146,9 @@ end
 SoloistMotionDisable(stage_handle);
 SoloistDisconnect();
 ina_device.Close();
+fclose(scope_session);
+delete(scope_session);
+clear scope_session
 
 % Save final dataset
 save(fullfile(save_dir, 'full_scan_data.mat'), 'scan_data', ...

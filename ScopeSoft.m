@@ -1,8 +1,6 @@
-function scope_data = ScopeSoft(ip, ch_sig, ch_ref, resamplingFactor,acq_time)
+function scope_data = ScopeSoft(ip, ch_sig, ch_ref, resamplingFactor)
 % Collect data from oscilloscope using modern VISA interface
-startTime = tic;
-while toc(startTime) < acq_time
-    try
+try
     
     % Collect data from both channels
     scope_data.ch1 = acquireSds2354X(ip, ch_sig, resamplingFactor);
@@ -25,4 +23,4 @@ catch ME
     end
     end
 end
-end
+
