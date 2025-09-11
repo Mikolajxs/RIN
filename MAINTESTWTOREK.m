@@ -1,5 +1,5 @@
 %% main.m - Step-Scan Control System with Multiple Movement Modes
-% Coordinates stage movement, INA data acquisition, and NI cRIO 9215 measurements
+% Coordinates stage movement, INA data acquisition, and NI USB 6002 measurements
 
 %% Initialize System
 clear; clc; close all;
@@ -17,17 +17,11 @@ end
 fprintf('\n--- Step Parameters ---\n');
 
 % Movement mode selection
-% Select movement mode
-% 1: Full range (-maxDist to +maxDist)
-% 2: Forward only (0 to +maxDist)
-% 3: Backward only (0 to -maxDist)
-mode = 1;
-% Distance parameters
-maxDist = 2; %mm
-step_size = 0.01; %mm
-move_speed = 5; 
-
-acq_time = 1;
+mode = 1; % 1: Full range, 2: Forward only, 3: Backward only
+maxDist = 2; % mm
+step_size = 0.01; % mm
+move_speed = 5; % mm/s
+acq_time = 1; % seconds
 
 %% Initialize Hardware
 try
@@ -46,7 +40,7 @@ try
     ina_device = PNA1("", "TL_NA_SDK.dll"); 
     ina_device.Initialize();
     
-    % Initialize NI cRIO 9215 with both AI0 and AI1 channels
+    % Initialize NI USB 6002 with both AI0 and AI1 channels
     fprintf('Initializing NI USB 6002...\n');
     ni_devices = daqlist("ni");
     if isempty(ni_devices)
@@ -54,16 +48,16 @@ try
     end
     
     d = daq("ni");
-    d.Rate = 1000;
+    d.Rate = 1000; % Sample rate in Hz
     
-    % Add analog input channels with RSE (Referenced Single-Ended) configuration
-    % RSE is appropriate for single-ended measurements referenced to ground
+    % Add analog input channels with RSE configuration
     ch1 = addinput(d, ni_devices.DeviceID(1), "ai0", "Voltage");
     ch2 = addinput(d, ni_devices.DeviceID(1), "ai1", "Voltage");
     
     % Set terminal configuration to RSE (Referenced Single-Ended)
     ch1.TerminalConfig = "SingleEnded";
     ch2.TerminalConfig = "SingleEnded";
+    
     fprintf('All instruments initialized successfully!\n');
 catch ME
     error('Hardware initialization failed: %s', ME.message);
@@ -107,10 +101,17 @@ scan_data = struct(...
     'step_number', [], ...
     'target_position', [], ...
     'actual_position', [], ...
-    'timestamps', [], ...
     'ina_results', [],...
     'ni_results', []...
 );
+
+%% Setup NI USB 6002 for Continuous Acquisition
+% Pre-allocate memory for NI data
+num_samples_per_step = acq_time * d.Rate;
+ni_data_buffer = zeros(num_samples_per_step, 2, num_steps);
+
+% Start continuous acquisition
+start(d, "continuous");
 
 %% Main Step-Scan Loop
 try
@@ -139,20 +140,16 @@ try
         fprintf('Collecting INA data (%.1f seconds)...\n', acq_time);
         scan_data(step).ina_results = InaSoft(ina_device, acq_time);
         
-        % --- Collect NI cRIO 9215 DATA  AIO0 and AIO1 ---
-        flush(d); %flushing data before making next read
-        start(d, "continuous");
+        % --- Collect NI USB 6002 DATA AI0 and AI1 ---
+        fprintf('Collecting NI data (%.1f seconds)...\n', acq_time);
         
-        % Wait for acquisition time
-        pause(acq_time);
+        % Read data for the specified acquisition time
+        data = read(d, seconds(acq_time), "OutputFormat", "Matrix");
         
-        % Read the collected data
-        [ni_data, timestamps] = read(d, "all");
+        % Store the data
+        ni_data_buffer(:, :, step) = data;
+        scan_data(step).ni_results = data;
         
-        % Stop acquisition
-        stop(d);
-        scan_data(step).ni_results = ni_data.Variables; % Store just the voltage value
-
         % --- Save intermediate results ---
         save(fullfile(save_dir, sprintf('step_%d_data.mat', step)), 'scan_data');
         fprintf('Data saved for step %d\n', step);
@@ -170,6 +167,9 @@ catch ME
 end
 
 %% Cleanup and Final Save
+% Stop continuous acquisition
+stop(d);
+
 % Release hardware resources
 SoloistMotionDisable(stage_handle);
 SoloistDisconnect();
@@ -177,6 +177,6 @@ ina_device.Close();
 clear d;
 
 % Save final dataset with all parameters included
-save(fullfile(save_dir, 'full_scan_data.mat'), 'scan_data', ...
+save(fullfile(save_dir, 'full_scan_data.mat'), 'scan_data', 'ni_data_buffer', ...
     'mode', 'maxDist', 'step_size', 'move_speed', 'acq_time', 'basePos', 'posVec');
 fprintf('\nScan complete! All data saved to:\n%s\n', save_dir);
