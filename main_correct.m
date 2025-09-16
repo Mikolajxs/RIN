@@ -16,6 +16,8 @@ end
 %% User Configuration
 fprintf('\n--- Step Parameters ---\n');
 
+RefWavelength = 1532.83045; % nm
+
 % Movement mode selection
 % Select movement mode
 % 1: Full range (-maxDist to +maxDist)
@@ -23,11 +25,12 @@ fprintf('\n--- Step Parameters ---\n');
 % 3: Backward only (0 to -maxDist)
 mode = 1;
 % Distance parameters
-maxDist = 2; %mm
-step_size = 0.01; %mm
+maxDist = 0.00625/4; %mm
+step_size = RefWavelength/16 * 1e-6; % mm
 move_speed = 5; 
 
-acq_time = 1;
+acq_time = 1.0;
+settling_time = 0.2;
 
 %% Initialize Hardware
 try
@@ -54,7 +57,7 @@ try
     end
     
     d = daq("ni");
-    d.Rate = 1000;
+    d.Rate = 5000;
     
     % Add analog input channels with RSE (Referenced Single-Ended) configuration
     % RSE is appropriate for single-ended measurements referenced to ground
@@ -62,8 +65,7 @@ try
     ch2 = addinput(d, ni_devices.DeviceID(1), "ai1", "Voltage");
     
     % Set terminal configuration to RSE (Referenced Single-Ended)
-    ch1.TerminalConfig = "SingleEnded";
-    ch2.TerminalConfig = "SingleEnded";
+    ch1.TerminalConfig = "SingleEnded"; %''Differential', 'SingleEnded', 'SingleEndedNonReferenced', 'PseudoDifferential'    %ch2.TerminalConfig = "SingleEnded";
     fprintf('All instruments initialized successfully!\n');
 catch ME
     error('Hardware initialization failed: %s', ME.message);
@@ -97,10 +99,22 @@ fprintf('Number of steps: %d\n', num_steps);
 fprintf('Position range: %.2f to %.2f mm\n', min(posVec), max(posVec));
 
 %% Create Data Directory
-data_dir = 'C:\Data\test\Mikolaj_test\11_09_25';
+data_dir = 'C:\Data\test\Mikolaj_test\16_09_25';
 save_dir = fullfile(data_dir, ['StepScan_' datestr(now, 'yyyymmdd_HHMMSS')]);
 mkdir(save_dir);
 fprintf('\nData will be saved to: %s\n', save_dir);
+
+%% Preparations for continous measurements
+
+% Prepare a buffer inside the DataAcquisition to collect chunks
+d.UserData = struct('t',[], 'y',[]);
+
+% Process ~50 ms windows per callback (adjust if you like)
+d.ScansAvailableFcnCount = 1000;
+d.ScansAvailableFcn = @(src,evt) collectChunkToUserData(src);
+
+% Start continuous background acquisition once (before your step loop)
+start(d, "continuous");
 
 %% Initialize Data Structures
 scan_data = struct(...
@@ -128,7 +142,7 @@ try
         % --- Verify position ---
         actual_pos = SoloistStatusGetItem(stage_handle, SoloistStatusItem.PositionFeedback);
         fprintf('Arrived at: %.4f mm (target: %.4f mm)\n', actual_pos, target_pos);
-        pause(0.3);  % Settling time
+        pause(settling_time);  % Settling time
         
         % --- Store position data ---
         scan_data(step).step_number = step;
@@ -137,21 +151,24 @@ try
      
         % --- Collect INA data ---
         fprintf('Collecting INA data (%.1f seconds)...\n', acq_time);
-        scan_data(step).ina_results = InaSoft(ina_device, acq_time);
+        scan_data(step).ina_results = InaSoft(ina_device, acq_time); 
         
-        % --- Collect NI cRIO 9215 DATA  AIO0 and AIO1 ---
-        flush(d); %flushing data before making next read
-        start(d, "continuous");
-        
-        % Wait for acquisition time
+        % Reset step buffer
+        d.UserData.t = [];
+        d.UserData.y = [];
+
+        % Let it accumulate for the window you want
         pause(acq_time);
+
+        % Snapshot the accumulated window (t is seconds since DAQ start)
+        t_step = d.UserData.t;
+        y_step = d.UserData.y;
+
+        % Store into scan_data
+        fprintf('Collecting NI data');
+        scan_data(step).timestamps = t_step;   
+        scan_data(step).ni_results  = y_step;  
         
-        % Read the collected data
-        [ni_data, timestamps] = read(d, "all");
-        
-        % Stop acquisition
-        stop(d);
-        scan_data(step).ni_results = ni_data.Variables; % Store just the voltage value
 
         % --- Save intermediate results ---
         save(fullfile(save_dir, sprintf('step_%d_data.mat', step)), 'scan_data');
@@ -174,9 +191,19 @@ end
 SoloistMotionDisable(stage_handle);
 SoloistDisconnect();
 ina_device.Close();
+stop(d);
 clear d;
 
 % Save final dataset with all parameters included
 save(fullfile(save_dir, 'full_scan_data.mat'), 'scan_data', ...
     'mode', 'maxDist', 'step_size', 'move_speed', 'acq_time', 'basePos', 'posVec');
 fprintf('\nScan complete! All data saved to:\n%s\n', save_dir);
+
+
+function collectChunkToUserData(src)
+    % Read exactly ScansAvailableFcnCount scans as a timetable
+    tt = read(src, src.ScansAvailableFcnCount, "OutputFormat", "timetable");
+    % Append time (seconds since acquisition started) and data (matrix)
+    src.UserData.t = [src.UserData.t; seconds(tt.Time)];
+    src.UserData.y = [src.UserData.y; tt.Variables];
+end
